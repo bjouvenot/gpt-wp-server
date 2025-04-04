@@ -1,73 +1,77 @@
 from flask import Flask, request, jsonify
-from datetime import datetime, timedelta
 import requests
 import json
-
-# === CONFIGURATION ===
-wp_url_posts = "https://www.jouvenot.com/wp-json/wp/v2/posts"
-wp_url_categories = "https://www.jouvenot.com/wp-json/wp/v2/categories"
-wp_user = "Bertrand Jouvenot"
-wp_app_password = "j4ZF PRKg NqCa 4ifO PiEA 0PiU"  # ← OK ici
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-def get_next_available_thursday():
-    now = datetime.now()
-    max_weeks = 12  # Recherche jusqu'à 12 semaines dans le futur
-    for i in range(1, max_weeks * 7):
-        test_day = now + timedelta(days=i)
-        if test_day.weekday() == 3:  # Jeudi
-            date_str = test_day.strftime('%Y-%m-%d')
-            r = requests.get(wp_url_posts, auth=(wp_user, wp_app_password), params={"status": "future"})
-            if r.status_code == 200:
-                for post in r.json():
-                    if post.get("date", "").startswith(date_str):
-                        break  # Ce jeudi est déjà pris
-                else:
-                    # Jeudi libre trouvé
-                    return test_day.replace(hour=8, minute=0, second=0, microsecond=0).isoformat()
-    return None
+# Liste des dates déjà utilisées pour les publications
+dates_occupees = [
+    "2024-04-04", "2024-04-11", "2024-04-18", "2024-04-25"  # ← à actualiser dynamiquement + tard
+]
 
-def get_category_id(name="Interview"):
-    r = requests.get(wp_url_categories, auth=(wp_user, wp_app_password))
-    if r.status_code == 200:
-        for cat in r.json():
-            if cat["name"].lower() == name.lower():
-                return cat["id"]
+def prochain_jeudi_libre(dates_occupees, date_forcee=None):
+    if date_forcee:
+        if date_forcee in dates_occupees:
+            return None
+        return date_forcee
+
+    aujourd_hui = datetime.today().date()
+    # Si on est vendredi ou après, on saute à la semaine prochaine
+    if aujourd_hui.weekday() >= 4:
+        aujourd_hui += timedelta(days=(7 - aujourd_hui.weekday()))
+    else:
+        aujourd_hui += timedelta(days=1)
+
+    for i in range(1, 365):  # vérifie jusqu’à 1 an à l’avance
+        jour = aujourd_hui + timedelta(days=i)
+        if jour.weekday() == 3:  # 3 = jeudi
+            jour_str = jour.strftime("%Y-%m-%d")
+            if jour_str not in dates_occupees:
+                return jour_str
     return None
 
 @app.route('/publier-interview', methods=['POST'])
 def publier():
-    data = request.get_json()
-    titre = data.get("titre")
-    contenu = data.get("contenu_html")
+    try:
+        data = request.get_json(force=True)
+        titre = data.get("titre")
+        contenu_html = data.get("contenu_html")
+        date_forcee = data.get("date_forcee")
 
-    if not titre or not contenu:
-        return jsonify({"error": "titre ou contenu_html manquant"}), 400
+        if not titre or not contenu_html:
+            return jsonify({"error": "Champs manquants"}), 400
 
-    date_publi = get_next_available_thursday()
-    if not date_publi:
-        return jsonify({"error": "Pas de jeudi libre"}), 400
+        date_publication = prochain_jeudi_libre(dates_occupees, date_forcee)
 
-    cat_id = get_category_id()
-    if not cat_id:
-        return jsonify({"error": "Catégorie 'Interview' non trouvée"}), 400
+        if not date_publication:
+            return jsonify({"error": "Pas de jeudi libre"}), 400
 
-    payload = {
-        "title": titre,
-        "content": contenu,
-        "status": "draft",
-        "date": date_publi,
-        "categories": [cat_id]
-    }
+        article = {
+            "title": titre,
+            "content": contenu_html,
+            "status": "draft",
+            "categories": [5],  # ID de la catégorie "Interview"
+            "date": f"{date_publication}T08:00:00"
+        }
 
-    headers = {"Content-Type": "application/json"}
-    r = requests.post(wp_url_posts, auth=(wp_user, wp_app_password), headers=headers, data=json.dumps(payload))
+        # Remplacer ci-dessous par tes identifiants WP
+        wp_url = "https://jouvenot.com/wp-json/wp/v2/posts"
+        wp_user = "ton_login"
+        wp_password = "ton_application_password"
 
-    if r.status_code in [200, 201]:
-        return jsonify({"success": True, "url": r.json().get("link")})
-    else:
-        return jsonify({"error": r.text}), 500
+        credentials = (wp_user, wp_password)
+        headers = {"Content-Type": "application/json"}
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+        response = requests.post(wp_url, headers=headers, auth=credentials, data=json.dumps(article))
+
+        if response.status_code == 201:
+            return jsonify({"message": f"Brouillon programmé le {date_publication}"}), 201
+        else:
+            return jsonify({"error": "Échec WordPress", "details": response.text}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
